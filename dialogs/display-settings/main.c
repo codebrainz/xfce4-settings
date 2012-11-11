@@ -27,6 +27,11 @@
 #ifdef HAVE_STRING_H
 #include <string.h>
 #endif
+#ifdef HAVE_MATH_H
+#include <math.h>
+#else
+#define M_PI 3.14 /* PI is exactly three! -Professor Frink [s12e16] */
+#endif
 
 #include <glib.h>
 #include <gtk/gtk.h>
@@ -874,6 +879,119 @@ display_setting_screen_changed (GtkWidget *widget,
     gtk_widget_set_colormap (widget, colormap);
 }
 
+/* allow user to interact with stuff underneath frame, must be done once
+ * the window is completely shown onto the screen (apparently) */
+static gboolean
+display_settings_identity_frame_map_event (GtkWidget   *frame_win,
+                                           GdkEventAny *event,
+                                           gpointer     user_data)
+{
+  GdkRegion *region = gdk_region_new ();
+  gdk_window_input_shape_combine_region (gtk_widget_get_window (frame_win),
+                                         region, 0, 0);
+  gdk_region_destroy (region);
+  return FALSE;
+}
+
+/* because it'd be too much trouble for Cairo to implement this function :/ */
+static void
+rounded_rectangle (cairo_t *cr,
+                                    gdouble  x,
+                                    gdouble  y,
+                                    gdouble  width,
+                                    gdouble  height,
+                                    gdouble  radius)
+{
+  cairo_move_to (cr, x+radius, y);
+  cairo_arc (cr, x+width-radius, y+radius, radius, M_PI + M_PI / 2, M_PI * 2);
+  cairo_arc (cr, x+width-radius, y+height-radius, radius, 0, M_PI / 2);
+  cairo_arc (cr, x+radius, y+height-radius, radius, M_PI/2, M_PI);
+  cairo_arc (cr, x+radius, y+radius, radius, M_PI, 270 * M_PI / 180);
+}
+
+static gboolean
+display_settings_identity_frame_expose_event (GtkWidget      *frame_win,
+                                              GdkEventExpose *expose,
+                                              gpointer        user_data)
+{
+  cairo_t *cr;
+  GtkAllocation alloc = {0};
+  const gdouble frame_width = 32.0;
+
+  gtk_widget_get_allocation (frame_win, &alloc);
+
+  cr = gdk_cairo_create (gtk_widget_get_window (frame_win));
+
+  cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
+
+  /* make background transparent */
+  cairo_rectangle (cr, 0, 0, alloc.width, alloc.height);
+  cairo_set_source_rgba (cr, 0.0, 0.0, 0.0, 0.0);
+  cairo_fill (cr);
+
+  /* ochosi: put the drawing code here */
+  cairo_set_source_rgba (cr, 0, 0, 0, 1);
+  cairo_rectangle (cr, 0, 0, alloc.width, alloc.height);
+  cairo_fill (cr);
+  /* ochosi: end the drawing code here */
+
+  /* cut-out the inside of the frame */
+  cairo_set_operator (cr, CAIRO_OPERATOR_CLEAR);
+  rounded_rectangle (cr,
+                     frame_width,
+                     frame_width,
+                     alloc.width - (frame_width * 2),
+                     alloc.height - (frame_width * 2),
+                     10);
+  cairo_fill (cr);
+
+  cairo_destroy (cr);
+
+  return TRUE;
+}
+
+static void
+display_settings_identity_show_frame (GtkWidget *popup)
+{
+  GdkScreen *screen;
+  GtkWidget *frame_win;
+  GdkColormap *colormap;
+
+  screen = gtk_widget_get_screen (popup);
+
+  /* don't draw a frame if compositing is disabled */
+  if (!gdk_screen_is_composited (screen))
+    return;
+
+  frame_win = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+  gtk_window_set_screen (GTK_WINDOW (frame_win), screen);
+
+  colormap = gdk_screen_get_rgba_colormap (screen);
+  gtk_widget_set_colormap (frame_win, colormap);
+
+  gtk_widget_set_app_paintable (frame_win, TRUE);
+  gtk_window_set_skip_pager_hint (GTK_WINDOW (frame_win), TRUE);
+  gtk_window_set_skip_taskbar_hint (GTK_WINDOW (frame_win), TRUE);
+  gtk_window_fullscreen (GTK_WINDOW (frame_win));
+  gtk_widget_show_all (frame_win);
+
+  g_signal_connect (frame_win,
+                    "map-event",
+                    G_CALLBACK (display_settings_identity_frame_map_event),
+                    NULL);
+
+  g_signal_connect (frame_win,
+                    "expose-event",
+                    G_CALLBACK (display_settings_identity_frame_expose_event),
+                    NULL);
+
+  /* destroy the new frame window when the popup window is destroyed */
+  g_signal_connect (popup,
+                    "destroy",
+                    G_CALLBACK (gtk_widget_destroy),
+                    frame_win);
+}
+
 static gboolean
 display_setting_identity_popup_expose (GtkWidget      *popup,
                                        GdkEventExpose *event,
@@ -881,10 +999,9 @@ display_setting_identity_popup_expose (GtkWidget      *popup,
 {
     cairo_t         *cr = gdk_cairo_create (popup->window);
     cairo_pattern_t *vertical_gradient, *innerstroke_gradient, *selected_gradient, *selected_innerstroke_gradient;
-    gint             radius;
+    const gint       radius = 10;
     gboolean         selected = (g_hash_table_lookup (display_popups, GINT_TO_POINTER (active_output)) == popup);
 
-    radius = 10;
     cairo_set_operator (cr, CAIRO_OPERATOR_SOURCE);
 
     /* Create the various gradients */
@@ -1056,6 +1173,8 @@ display_setting_identity_display (gint display_id)
 
         gtk_window_present (GTK_WINDOW (popup));
     }
+
+    display_settings_identity_show_frame (popup);
 
     /* Release the builder */
     g_object_unref (G_OBJECT (builder));
